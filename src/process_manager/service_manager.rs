@@ -161,7 +161,10 @@ impl ServiceManager {
                 .kill_on_drop(true)
                 .spawn()
                 .wrap_err_with(|| {
-                    format!("Failed to spawn pre-start binary for {}: {:?}", self.name, bin)
+                    format!(
+                        "Failed to spawn pre-start binary for {}: {:?}",
+                        self.name, bin
+                    )
                 })?;
             let guard =
                 Subreaper::track_child(process.id()).wrap_err("Failed to track pre-start child")?;
@@ -203,7 +206,7 @@ impl ServiceManager {
     /// Attaches loggers and `wait`s on the process, forwarding
     /// shutdown sequeneces
     pub async fn spawn_service_process(&mut self) -> Result<()> {
-        if let Some(ref pre_start) = self.service.pre_start {
+        if let Some(pre_start) = &self.service.pre_start {
             info!(target: &self.name, "Running pre-start script ({})", pre_start);
             self.run_pre_start(pre_start).await?;
         }
