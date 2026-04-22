@@ -227,34 +227,90 @@ impl ServiceManager {
             self.run_pre_start(pre_start).await?;
         }
 
-        let (process, _guard) = self.create_service_child().await?;
+        let (process, guard) = self.create_service_child()?;
+
+        let service_result: Result<()>;
+        let ready_result: Result<()>;
 
         if let Some(ready_check) = &self.service.ready_check {
+            let timeout = self.settings.ready.timeout;
             info!(target: &self.name, "Running readiness check ({})", ready_check);
-            self.run_ready_check(ready_check).await?;
+
+            let service_handle = tokio::spawn(async move {
+                Self::run_with_loggers(process).await
+            });
+
+            let ready_handle = tokio::spawn(async move {
+                Self::run_ready_check_with_timeout(ready_check, timeout).await
+            });
+
+            let service_res = service_handle.await?;
+            let ready_res = ready_handle.await?;
+
+            service_result = service_res;
+            ready_result = ready_res;
+        } else {
+            if let Some(tx) = self.started_signal.take() {
+                let _ = tx.send(true);
+            }
+            return Self::run_with_loggers(process).await;
         }
 
         if let Some(tx) = self.started_signal.take() {
             let _ = tx.send(true);
         }
 
-        self.run_with_loggers(process).await
+        service_result?;
+        ready_result?;
+
+        Ok(())
     }
 
-    /// Runs the readiness check for this service, retrying until it exits 0.
-    async fn run_ready_check(&self, bin: &str) -> Result<()> {
-        loop {
-            let error_ctx = format!(
-                "Failed to run readiness check for {}: {:?}",
-                self.name, bin
-            );
-let (mut process, _guard) = self.spawn_process(bin, &[], &error_ctx).await?;
-            let status = process.wait().await?;
-            if status.success() {
-                return Ok(());
+    /// Runs the readiness check for this service, retrying until it exits 0 or timeout.
+    async fn run_ready_check_with_timeout(bin: &str, timeout: std::time::Duration) -> Result<()> {
+        let check_result = timeout(timeout, async {
+            loop {
+                let error_ctx = format!(
+                    "Failed to run readiness check: {:?}",
+                    bin
+                );
+                let (mut process, _guard) = Self::spawn_process_inner(bin, &[], &error_ctx).await?;
+                let status = process.wait().await?;
+                if status.success() {
+                    return Ok::<_, eyre::Report>(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }).await;
+
+        match check_result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(_) => eyre::bail!("readiness check timed out after {:?}", timeout),
         }
+    }
+
+    /// Spawn a process (internal helper)
+    async fn spawn_process_inner(
+        &self,
+        binary: &str,
+        args: &[&str],
+        error_context: &str,
+    ) -> Result<(Child, ChildGuard)> {
+        let _pause = Subreaper::pause_reaping();
+        let mut cmd = Command::new(binary);
+        if !args.is_empty() {
+            cmd.args(args);
+        }
+        let child = cmd
+            .env("XDG_CONFIG_HOME", &self.config_dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .wrap_err_with(|| error_context.to_string())?;
+        let guard = Subreaper::track_child(child.id()).wrap_err("Failed to track child")?;
+        Ok((child, guard))
     }
 
     /// Kill a service process gracefully
