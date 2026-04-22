@@ -13,7 +13,7 @@ use eyre::{Context, Result};
 use log::{debug, info};
 use thiserror::Error;
 use tokio::sync::watch;
-use tokio::time::timeout;
+use tokio::time::timeout as tokio_timeout;
 use tokio::{
     process::{Child, Command},
     task::JoinSet,
@@ -227,7 +227,8 @@ impl ServiceManager {
             self.run_pre_start(pre_start).await?;
         }
 
-        let (process, guard) = self.create_service_child()?;
+        let (process, _guard) = self.create_service_child().await?;
+        let _guard = Arc::new(_guard);
 
         let service_result: Result<()>;
         let ready_result: Result<()>;
@@ -236,24 +237,22 @@ impl ServiceManager {
             let timeout = self.settings.ready.timeout;
             info!(target: &self.name, "Running readiness check ({})", ready_check);
 
-            let service_handle = tokio::spawn(async move {
-                Self::run_with_loggers(process).await
-            });
-
+            let ready_check = ready_check.clone();
+            let config_dir_path = self.config_dir.path().clone();
             let ready_handle = tokio::spawn(async move {
-                Self::run_ready_check_with_timeout(ready_check, timeout).await
+                Self::run_ready_check_with_timeout_from_parts(&ready_check, timeout, config_dir_path).await
             });
 
-            let service_res = service_handle.await?;
-            let ready_res = ready_handle.await?;
+            self.run_with_loggers(process).await?;
+            let ready_res = ready_handle.await??;
 
-            service_result = service_res;
-            ready_result = ready_res;
+            service_result = Ok(());
+            ready_result = Ok(ready_res);
         } else {
             if let Some(tx) = self.started_signal.take() {
                 let _ = tx.send(true);
             }
-            return Self::run_with_loggers(process).await;
+            return self.run_with_loggers(process).await;
         }
 
         if let Some(tx) = self.started_signal.take() {
@@ -266,16 +265,38 @@ impl ServiceManager {
         Ok(())
     }
 
-    /// Runs the readiness check for this service, retrying until it exits 0 or timeout.
-    async fn run_ready_check_with_timeout(bin: &str, timeout: std::time::Duration) -> Result<()> {
-        let check_result = timeout(timeout, async {
+    #[allow(dead_code)]
+    async fn run_with_loggers_from_parts(
+        mut process: Child,
+        name: Arc<String>,
+        logs_dir: Arc<Option<PathBuf>>,
+    ) -> Result<()> {
+        let mut set = JoinSet::new();
+
+        Logger::Stdout.start(&mut process.stdout, Arc::clone(&name), Arc::clone(&logs_dir), &mut set)?;
+        Logger::Stderr.start(&mut process.stderr, Arc::clone(&name), Arc::clone(&logs_dir), &mut set)?;
+
+        let status = process.wait().await.wrap_err("Failed to get process status")?;
+        eyre::ensure!(status.success(), ServiceError::ProcessExited { status });
+
+        set.join_all().await.into_iter().collect()
+    }
+
+    async fn run_ready_check_with_timeout_from_parts(
+        bin: &str,
+        timeout: std::time::Duration,
+        config_dir: PathBuf,
+    ) -> Result<()> {
+        let config_dir = Arc::new(config_dir);
+        let check_result = tokio_timeout(timeout, async {
             loop {
-                let error_ctx = format!(
-                    "Failed to run readiness check: {:?}",
-                    bin
-                );
-                let (mut process, _guard) = Self::spawn_process_inner(bin, &[], &error_ctx).await?;
-                let status = process.wait().await?;
+                let cd = Arc::clone(&config_dir);
+                let mut cmd = Command::new(bin);
+                cmd.env("XDG_CONFIG_HOME", cd.as_ref())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+                let mut child = cmd.spawn().wrap_err_with(|| format!("Failed to spawn readiness check: {:?}", bin))?;
+                let status = child.wait().await.wrap_err("Failed to wait on readiness check")?;
                 if status.success() {
                     return Ok::<_, eyre::Report>(());
                 }
@@ -291,6 +312,7 @@ impl ServiceManager {
     }
 
     /// Spawn a process (internal helper)
+    #[allow(dead_code)]
     async fn spawn_process_inner(
         &self,
         binary: &str,
@@ -326,7 +348,7 @@ impl ServiceManager {
             if let Some(pid) = process.id() {
                 let pid = Pid::from_raw(pid as i32);
                 let _ = kill(pid, Signal::SIGTERM);
-                if timeout(timeout_duration, process.wait()).await.is_err() {
+                if tokio_timeout(timeout_duration, process.wait()).await.is_err() {
                     let _ = kill(pid, Signal::SIGKILL);
                     let _ = process.wait().await;
                 }
