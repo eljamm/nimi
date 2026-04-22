@@ -326,10 +326,8 @@ impl ProcessManager {
                         result
                     }
                 };
-                if run_result.is_ok() {
-                    if let Some(tx) = ready_signal {
-                        let _ = tx.send(true);
-                    }
+                if run_result.is_ok() && let Some(tx) = ready_signal {
+                    let _ = tx.send(true);
                 }
 
                 Ok(())
