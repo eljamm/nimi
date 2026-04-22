@@ -44,6 +44,9 @@ pub struct ServiceManager {
 
     /// Fires once after the first successful process spawn to unblock dependents
     started_signal: Option<watch::Sender<bool>>,
+
+    /// Fires once after readiness check passes
+    ready_signal: Option<watch::Sender<bool>>,
 }
 
 /// Errors which can occur during service management
@@ -78,15 +81,13 @@ pub struct ServiceManagerOpts {
 
     /// Channel to signal when the first process spawn succeeds
     pub started_signal: Option<watch::Sender<bool>>,
+
+    /// Channel to signal when readiness check passes
+    pub ready_signal: Option<watch::Sender<bool>>,
 }
 
 impl ServiceManager {
     /// Creates a new Service Manager
-    ///
-    /// This creates the corresponding processes and supervises the operation for a given
-    /// `Service`.
-    ///
-    /// This also produces a `ConfigDir` instance per service.
     pub async fn new(opts: ServiceManagerOpts) -> Result<Self> {
         Ok(Self {
             config_dir: ConfigDir::new(&opts.tmp_dir, &opts.service.config_data).await?,
@@ -100,6 +101,7 @@ impl ServiceManager {
             current_restart_count: 0,
             logs_dir: opts.logs_dir,
             started_signal: opts.started_signal,
+            ready_signal: opts.ready_signal,
         })
     }
 
@@ -239,8 +241,13 @@ impl ServiceManager {
 
             let ready_check = ready_check.clone();
             let config_dir_path = self.config_dir.path().clone();
+            let ready_signal = self.ready_signal.take();
             let ready_handle = tokio::spawn(async move {
-                Self::run_ready_check_with_timeout_from_parts(&ready_check, timeout, config_dir_path).await
+                let result = Self::run_ready_check_with_timeout_from_parts(&ready_check, timeout, config_dir_path).await;
+                if result.is_ok() && let Some(tx) = ready_signal {
+                    let _ = tx.send(true);
+                }
+                result
             });
 
             self.run_with_loggers(process).await?;

@@ -290,6 +290,7 @@ impl ProcessManager {
                 service,
                 cancel_tok: cancel_tok.clone(),
                 started_signal: spawn_signal,
+                ready_signal: ready_signal.clone(),
             };
 
             join_set.spawn(async move {
