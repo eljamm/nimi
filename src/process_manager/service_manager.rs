@@ -242,9 +242,12 @@ impl ServiceManager {
             let ready_check = ready_check.clone();
             let config_dir_path = self.config_dir.path().clone();
             let ready_signal = self.ready_signal.take();
+            let name = Arc::clone(&self.name);
+            debug!(target: &self.name, "ready_signal channel: {:?}", ready_signal.is_some());
             let ready_handle = tokio::spawn(async move {
                 let result = Self::run_ready_check_with_timeout_from_parts(&ready_check, timeout, config_dir_path).await;
                 if result.is_ok() && let Some(tx) = ready_signal {
+                    debug!(target: &name, "Sending ready_signal!");
                     let _ = tx.send(true);
                 }
                 result

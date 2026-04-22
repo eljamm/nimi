@@ -307,12 +307,14 @@ impl ProcessManager {
                 }
 
                 for (mut rx, dep) in ready_rxs.into_iter().zip(ready_dep_names.iter()) {
+                    info!(target: &opts.name.as_str(), "Waiting for ready dependency: {}", dep);
                     tokio::select! {
                         result = rx.wait_for(|v| *v) => {
                             result.map_err(|_| eyre::eyre!(
                                 "dependency {dep} not ready before service {} could start",
                                 opts.name
                             ))?;
+                            info!(target: &opts.name.as_str(), "Ready dependency ready: {}", dep);
                         }
                         _ = cancel.cancelled() => return Ok(()),
                     }
