@@ -230,8 +230,8 @@ impl ServiceManager {
         let (process, _guard) = self.create_service_child().await?;
         let _guard = Arc::new(_guard);
 
-        let service_result: Result<()>;
-        let ready_result: Result<()>;
+        let service_result: eyre::Result<()>;
+        let ready_result: eyre::Result<()>;
 
         if let Some(ready_check) = &self.service.ready_check {
             let timeout = self.settings.ready.timeout;
@@ -244,10 +244,10 @@ impl ServiceManager {
             });
 
             self.run_with_loggers(process).await?;
-            let ready_res = ready_handle.await??;
+            ready_handle.await??;
 
             service_result = Ok(());
-            ready_result = Ok(ready_res);
+            ready_result = Ok(());
         } else {
             if let Some(tx) = self.started_signal.take() {
                 let _ = tx.send(true);
