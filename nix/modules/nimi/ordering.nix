@@ -42,6 +42,15 @@ in
         type = types.listOf types.str;
         default = [ ];
       };
+      options.afterReady = mkOption {
+        description = ''
+          List of service names that must be ready before this
+          service is spawned. Each target must declare a
+          readiness check.
+        '';
+        type = types.listOf types.str;
+        default = [ ];
+      };
     });
     default = { };
   };
@@ -53,12 +62,23 @@ in
         message = "ordering.${name} references a service that does not exist.";
       };
 
-      mkDepAssertions = name: deps:
+      mkAfterAssertions = name: deps:
         map (dep: {
           assertion = builtins.elem dep serviceNames;
           message = "ordering.${name}.after references unknown service \"${dep}\".";
         }) deps;
+
+      mkAfterReadyAssertions = name: deps:
+        map (dep: {
+          assertion = builtins.elem dep serviceNames;
+          message = "ordering.${name}.afterReady references unknown service \"${dep}\".";
+        }) deps
+        ++ map (dep: {
+          assertion = config.services.${dep}.readyCheck != null;
+          message = "ordering.${name}.afterReady references service \"${dep}\" without readyCheck.";
+        }) deps;
     in
     (map mkKeyAssertion orderingKeys)
-    ++ (lib.concatLists (lib.mapAttrsToList (name: o: mkDepAssertions name o.after) config.ordering));
+    ++ (lib.concatLists (lib.mapAttrsToList (name: o: mkAfterAssertions name o.after) config.ordering))
+    ++ (lib.concatLists (lib.mapAttrsToList (name: o: mkAfterReadyAssertions name o.afterReady) config.ordering));
 }

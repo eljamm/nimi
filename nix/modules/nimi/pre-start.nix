@@ -32,6 +32,29 @@ in
               )
             '';
           };
+          options.readyCheck = mkOption {
+            description = ''
+              Path to an executable to run to determine if the service is ready.
+
+              The executable should exit 0 when the service is ready.
+              It will be polled repeatedly until it succeeds.
+              Required for services that will be used as `afterReady` targets.
+
+              Set to `null` to disable.
+            '';
+            type = types.nullOr types.pathInStore;
+            default = null;
+            example = lib.literalExpression ''
+              lib.getExe (
+                pkgs.writeShellApplication {
+                  name = "example-ready-check";
+                  text = '''
+                    curl -f http://localhost:8080/health || exit 1
+                  ''';
+                }
+              )
+            '';
+          };
         }
       ];
     });

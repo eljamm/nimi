@@ -229,11 +229,32 @@ impl ServiceManager {
 
         let (process, _guard) = self.create_service_child().await?;
 
+        if let Some(ready_check) = &self.service.ready_check {
+            info!(target: &self.name, "Running readiness check ({})", ready_check);
+            self.run_ready_check(ready_check).await?;
+        }
+
         if let Some(tx) = self.started_signal.take() {
             let _ = tx.send(true);
         }
 
         self.run_with_loggers(process).await
+    }
+
+    /// Runs the readiness check for this service, retrying until it exits 0.
+    async fn run_ready_check(&self, bin: &str) -> Result<()> {
+        loop {
+            let error_ctx = format!(
+                "Failed to run readiness check for {}: {:?}",
+                self.name, bin
+            );
+let (mut process, _guard) = self.spawn_process(bin, &[], &error_ctx).await?;
+            let status = process.wait().await?;
+            if status.success() {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
     }
 
     /// Kill a service process gracefully
