@@ -254,6 +254,8 @@ impl ProcessManager {
         }
 
         for (name, service) in self.services {
+            debug!("Processing service: {}", name);
+
             let spawn_dep_names: Vec<String> = self
                 .ordering
                 .get(&name)
@@ -265,6 +267,12 @@ impl ProcessManager {
                 .get(&name)
                 .map(|o| o.after_ready.clone())
                 .unwrap_or_default();
+
+            debug!(
+                target: &name,
+                "Service {} ordering: spawn_deps={:?}, ready_deps={:?}",
+                name, spawn_dep_names, ready_dep_names
+            );
 
             let spawn_rxs: Vec<watch::Receiver<bool>> = spawn_dep_names
                 .iter()
@@ -278,6 +286,13 @@ impl ProcessManager {
 
             let spawn_signal = spawn_senders.remove(&name);
             let ready_signal = ready_senders.remove(&name);
+            debug!(
+                target: &name,
+                "Service {} received: spawn_signal={}, ready_signal={}",
+                name,
+                spawn_signal.is_some(),
+                ready_signal.is_some()
+            );
             let cancel = cancel_tok.clone();
 
             let opts = ServiceManagerOpts {
@@ -294,6 +309,7 @@ impl ProcessManager {
             };
 
             join_set.spawn(async move {
+                info!(target: &opts.name.as_str(), "Service {} task spawned", opts.name);
                 for (mut rx, dep) in spawn_rxs.into_iter().zip(spawn_dep_names.iter()) {
                     tokio::select! {
                         result = rx.wait_for(|v| *v) => {
