@@ -8,9 +8,11 @@ use futures::future::OptionFuture;
 use libmprocs::{ProcConfig, StopSignal, mprocs};
 use log::{debug, info};
 use std::process::Stdio;
-use std::{collections::HashMap, env, io::ErrorKind, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap, env, io::ErrorKind, path::PathBuf, process::ExitStatus, sync::Arc,
+};
 use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::watch;
+use tokio::sync::broadcast;
 use tokio::{fs, process::Command, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
@@ -29,6 +31,21 @@ use crate::process_manager::service_manager::{
 };
 use crate::subreaper::Subreaper;
 
+/// Lifecycle events emitted by services via the broadcast event bus.
+#[derive(Clone, Debug)]
+pub enum ServiceEvent {
+    /// Service process has been successfully spawned
+    Spawned(String),
+    /// Service readiness check has passed (only emitted if readyCheck is configured)
+    Ready(String),
+    /// Service process failed with the given exit status
+    Failed(String, ExitStatus),
+    /// Service was stopped (graceful shutdown)
+    Stopped(String),
+    /// Service is being restarted
+    Restarting(String),
+}
+
 /// Process Manager Struct
 ///
 /// Responsible for starting the services and streaming their outputs to the console
@@ -36,6 +53,7 @@ pub struct ProcessManager {
     services: HashMap<String, Service>,
     settings: Settings,
     ordering: HashMap<String, ServiceOrdering>,
+    event_tx: broadcast::Sender<ServiceEvent>,
 }
 
 impl ProcessManager {
@@ -49,6 +67,7 @@ impl ProcessManager {
             services,
             settings,
             ordering,
+            event_tx: broadcast::Sender::new(32),
         }
     }
 
@@ -240,45 +259,38 @@ impl ProcessManager {
         );
         let tmp_dir = Arc::new(env::temp_dir());
 
-        let mut spawn_senders: HashMap<String, watch::Sender<bool>> = HashMap::new();
-        let mut spawn_receivers: HashMap<String, watch::Receiver<bool>> = HashMap::new();
-        let mut ready_senders: HashMap<String, watch::Sender<bool>> = HashMap::new();
-        let mut ready_receivers: HashMap<String, watch::Receiver<bool>> = HashMap::new();
-        for name in self.services.keys() {
-            let (spawn_tx, spawn_rx) = watch::channel(false);
-            spawn_senders.insert(name.clone(), spawn_tx);
-            spawn_receivers.insert(name.clone(), spawn_rx);
-            let (ready_tx, ready_rx) = watch::channel(false);
-            ready_senders.insert(name.clone(), ready_tx);
-            ready_receivers.insert(name.clone(), ready_rx);
-        }
+        let spawn_dep_names: HashMap<String, Vec<String>> = self
+            .services
+            .keys()
+            .map(|name| {
+                let deps = self
+                    .ordering
+                    .get(name)
+                    .map(|o| o.after.clone())
+                    .unwrap_or_default();
+                (name.clone(), deps)
+            })
+            .collect();
+
+        let ready_dep_names: HashMap<String, Vec<String>> = self
+            .services
+            .keys()
+            .map(|name| {
+                let deps = self
+                    .ordering
+                    .get(name)
+                    .map(|o| o.after_ready.clone())
+                    .unwrap_or_default();
+                (name.clone(), deps)
+            })
+            .collect();
 
         for (name, service) in self.services {
-            let spawn_dep_names: Vec<String> = self
-                .ordering
-                .get(&name)
-                .map(|o| o.after.clone())
-                .unwrap_or_default();
-
-            let ready_dep_names: Vec<String> = self
-                .ordering
-                .get(&name)
-                .map(|o| o.after_ready.clone())
-                .unwrap_or_default();
-
-            let spawn_rxs: Vec<watch::Receiver<bool>> = spawn_dep_names
-                .iter()
-                .map(|dep| spawn_receivers.get(dep).expect("validated").clone())
-                .collect();
-
-            let ready_rxs: Vec<watch::Receiver<bool>> = ready_dep_names
-                .iter()
-                .map(|dep| ready_receivers.get(dep).expect("validated").clone())
-                .collect();
-
-            let spawn_signal = spawn_senders.remove(&name);
-            let ready_signal = ready_senders.remove(&name);
+            let s_dep_names = spawn_dep_names.get(&name).cloned().unwrap_or_default();
+            let r_dep_names = ready_dep_names.get(&name).cloned().unwrap_or_default();
             let cancel = cancel_tok.clone();
+            let event_tx = self.event_tx.clone();
+            let mut event_rx = self.event_tx.subscribe();
 
             let opts = ServiceManagerOpts {
                 logs_dir: Arc::clone(&logs_dir),
@@ -289,30 +301,48 @@ impl ProcessManager {
                 name: Arc::new(name.clone()),
                 service,
                 cancel_tok: cancel_tok.clone(),
-                started_signal: spawn_signal,
-                ready_signal: ready_signal.clone(),
+                event_tx: event_tx.clone(),
             };
 
             join_set.spawn(async move {
-                for (mut rx, dep) in spawn_rxs.into_iter().zip(spawn_dep_names.iter()) {
-                    tokio::select! {
-                        result = rx.wait_for(|v| *v) => {
-                            result.map_err(|_| eyre::eyre!(
-                                "dependency {dep} failed before service {} could start",
-                                opts.name
-                            ))?;
-                        }
-                        _ = cancel.cancelled() => return Ok(()),
-                    }
-                }
+                let service_name = opts.name.to_string();
+                let mut spawned_satisfied: HashMap<String, bool> =
+                    s_dep_names.iter().map(|d| (d.clone(), false)).collect();
+                let mut ready_satisfied: HashMap<String, bool> =
+                    r_dep_names.iter().map(|d| (d.clone(), false)).collect();
 
-                for (mut rx, dep) in ready_rxs.into_iter().zip(ready_dep_names.iter()) {
+                loop {
+                    let all_spawn_done = spawned_satisfied.values().all(|v| *v);
+                    let all_ready_done = ready_satisfied.values().all(|v| *v);
+                    if all_spawn_done && all_ready_done {
+                        break;
+                    }
+
                     tokio::select! {
-                        result = rx.wait_for(|v| *v) => {
-                            result.map_err(|_| eyre::eyre!(
-                                "dependency {dep} not ready before service {} could start",
-                                opts.name
-                            ))?;
+                        event = event_rx.recv() => {
+                            let event = event.map_err(|e| eyre::eyre!("event channel closed: {e}"))?;
+                            match event {
+                                ServiceEvent::Spawned(ref dep) => {
+                                    if let Some(sat) = spawned_satisfied.get_mut(dep) {
+                                        *sat = true;
+                                    }
+                                }
+                                ServiceEvent::Ready(ref dep) => {
+                                    if let Some(sat) = ready_satisfied.get_mut(dep) {
+                                        *sat = true;
+                                    }
+                                }
+                                ServiceEvent::Failed(ref dep, _status)
+                                    if spawned_satisfied.contains_key(dep)
+                                        || ready_satisfied.contains_key(dep) =>
+                                {
+                                    return Err(eyre::eyre!(
+                                        "dependency {dep} failed before service {} could start",
+                                        service_name
+                                    ));
+                                }
+                                _ => {}
+                            }
                         }
                         _ = cancel.cancelled() => return Ok(()),
                     }
@@ -327,10 +357,9 @@ impl ProcessManager {
                         result
                     }
                 };
-                if run_result.is_ok()
-                    && let Some(tx) = ready_signal
-                {
-                    let _ = tx.send(true);
+
+                if run_result.is_ok() && !r_dep_names.is_empty() {
+                    let _ = event_tx.send(ServiceEvent::Ready(service_name));
                 }
 
                 Ok(())

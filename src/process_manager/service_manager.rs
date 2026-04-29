@@ -12,7 +12,7 @@ use std::{
 use eyre::{Context, Result};
 use log::{debug, info};
 use thiserror::Error;
-use tokio::sync::watch;
+use tokio::sync::broadcast;
 use tokio::time::timeout as tokio_timeout;
 use tokio::{
     process::{Child, Command},
@@ -26,7 +26,7 @@ pub use config_dir::ConfigDir;
 pub use logger::Logger;
 use tokio_util::sync::CancellationToken;
 
-use crate::process_manager::{Service, Settings, settings::RestartMode};
+use crate::process_manager::{Service, ServiceEvent, Settings, settings::RestartMode};
 use crate::subreaper::{ChildGuard, Subreaper};
 
 /// Responsible for the running of and managing of service state
@@ -42,11 +42,7 @@ pub struct ServiceManager {
     config_dir: ConfigDir,
     logs_dir: Arc<Option<PathBuf>>,
 
-    /// Fires once after the first successful process spawn to unblock dependents
-    started_signal: Option<watch::Sender<bool>>,
-
-    /// Fires once after readiness check passes
-    ready_signal: Option<watch::Sender<bool>>,
+    event_tx: broadcast::Sender<ServiceEvent>,
 }
 
 /// Errors which can occur during service management
@@ -79,11 +75,8 @@ pub struct ServiceManagerOpts {
     /// Cancellation token
     pub cancel_tok: CancellationToken,
 
-    /// Channel to signal when the first process spawn succeeds
-    pub started_signal: Option<watch::Sender<bool>>,
-
-    /// Channel to signal when readiness check passes
-    pub ready_signal: Option<watch::Sender<bool>>,
+    /// Event bus for lifecycle signals
+    pub event_tx: broadcast::Sender<ServiceEvent>,
 }
 
 impl ServiceManager {
@@ -100,8 +93,7 @@ impl ServiceManager {
 
             current_restart_count: 0,
             logs_dir: opts.logs_dir,
-            started_signal: opts.started_signal,
-            ready_signal: opts.ready_signal,
+            event_tx: opts.event_tx,
         })
     }
 
@@ -232,9 +224,9 @@ impl ServiceManager {
         let (process, _guard) = self.create_service_child().await?;
         let _guard = Arc::new(_guard);
 
-        if let Some(tx) = self.started_signal.take() {
-            let _ = tx.send(true);
-        }
+        let _ = self
+            .event_tx
+            .send(ServiceEvent::Spawned(self.name.to_string()));
 
         let service_result: eyre::Result<()>;
         let ready_result: eyre::Result<()>;
@@ -245,7 +237,8 @@ impl ServiceManager {
 
             let ready_check = ready_check.clone();
             let config_dir_path = self.config_dir.path().clone();
-            let ready_signal = self.ready_signal.take();
+            let event_tx = self.event_tx.clone();
+            let name = self.name.to_string();
             let ready_handle = tokio::spawn(async move {
                 let result = Self::run_ready_check_with_timeout_from_parts(
                     &ready_check,
@@ -253,10 +246,8 @@ impl ServiceManager {
                     config_dir_path,
                 )
                 .await;
-                if result.is_ok()
-                    && let Some(tx) = ready_signal
-                {
-                    let _ = tx.send(true);
+                if result.is_ok() {
+                    let _ = event_tx.send(ServiceEvent::Ready(name));
                 }
                 result
             });
