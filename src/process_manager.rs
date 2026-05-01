@@ -3,8 +3,6 @@
 //! Can take a rust represntation of some `NixOS` modular services
 //! and runs them streaming logs back to the original console.
 
-#![allow(clippy::redundant_closure)]
-
 use eyre::{Context, Result};
 use futures::future::OptionFuture;
 use libmprocs::{ProcConfig, StopSignal, mprocs};

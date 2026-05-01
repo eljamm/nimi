@@ -3,10 +3,6 @@
 //! Provides service dependency ordering, cycle detection, and startup graph collection.
 //! Based on rustysd's ordering system: https://github.com/KillingSpark/rustysd
 
-#![allow(clippy::manual_retain)]
-#![allow(clippy::let_and_return)]
-#![allow(clippy::iter_nth_zero)]
-#![allow(clippy::question_mark)]
 use std::collections::HashMap;
 
 /// Service identifier
@@ -63,11 +59,9 @@ impl Dependencies {
         let mut ids = Vec::new();
         ids.extend(self.wants.iter().cloned());
         ids.extend(self.requires.iter().cloned());
-        let ids = ids
-            .into_iter()
+        ids.into_iter()
             .filter(|id| !self.after.contains(id))
-            .collect();
-        ids
+            .collect()
     }
 
     /// Deduplicate dependencies
@@ -213,7 +207,7 @@ pub fn sanity_check_dependencies(
         } else {
             let root_id = not_finished_ids
                 .keys()
-                .filter(|id| {
+                .find(|id| {
                     let unit = unit_table.get(id).unwrap();
                     let in_degree = unit.after.iter().fold(0, |acc, id| {
                         if finished_ids.contains_key(id) {
@@ -223,8 +217,7 @@ pub fn sanity_check_dependencies(
                         }
                     });
                     in_degree == 0
-                })
-                .nth(0);
+                });
             if let Some(id) = root_id {
                 id.clone()
             } else {
@@ -283,9 +276,7 @@ fn search_backedge(
             finished_ids,
             not_finished_ids,
         );
-        if res.is_err() {
-            return res;
-        }
+        res?;
     }
     visited_ids.pop();
     finished_ids.insert(id.clone(), ());
@@ -313,10 +304,10 @@ pub fn collect_unit_start_subgraph(
         }
         new_ids.sort();
         new_ids.dedup();
-        new_ids = new_ids
-            .into_iter()
-            .filter(|id| !ids_to_start.contains(id))
-            .collect();
+        
+        // keep only ids not already in ids_to_start
+        let already_present: Vec<UnitId> = ids_to_start.to_vec();
+        new_ids.retain(|id| !already_present.contains(id));
 
         if new_ids.is_empty() {
             break;
