@@ -153,7 +153,13 @@ impl ServiceManager {
 
     async fn run_oneshot(&mut self) -> Result<()> {
         info!(target: &self.name, "Running oneshot service");
-        self.spawn_service_process().await
+        let result = self.spawn_service_process().await;
+
+        if result.is_ok() {
+            let _ = self.event_tx.send(ServiceEvent::Ready(self.name.to_string()));
+        }
+
+        result
     }
 
     /// Spawn a process with common setup

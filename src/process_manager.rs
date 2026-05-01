@@ -403,7 +403,7 @@ impl ProcessManager {
                     }
                 };
 
-                if run_result.is_ok() && !r_dep_names.is_empty() {
+                if run_result.is_ok() {
                     let _ = event_tx.send(ServiceEvent::Ready(service_name));
                 }
 
