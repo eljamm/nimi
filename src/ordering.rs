@@ -3,6 +3,10 @@
 //! Provides service dependency ordering, cycle detection, and startup graph collection.
 //! Based on rustysd's ordering system: https://github.com/KillingSpark/rustysd
 
+#![allow(clippy::manual_retain)]
+#![allow(clippy::let_and_return)]
+#![allow(clippy::iter_nth_zero)]
+#![allow(clippy::question_mark)]
 use std::collections::HashMap;
 
 /// Service identifier
@@ -311,7 +315,7 @@ pub fn collect_unit_start_subgraph(
         new_ids.dedup();
         new_ids = new_ids
             .into_iter()
-            .filter(|id| !ids_to_start.contains(&id))
+            .filter(|id| !ids_to_start.contains(id))
             .collect();
 
         if new_ids.is_empty() {

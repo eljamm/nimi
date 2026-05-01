@@ -3,6 +3,8 @@
 //! Can take a rust represntation of some `NixOS` modular services
 //! and runs them streaming logs back to the original console.
 
+#![allow(clippy::redundant_closure)]
+
 use eyre::{Context, Result};
 use futures::future::OptionFuture;
 use libmprocs::{ProcConfig, StopSignal, mprocs};
@@ -183,7 +185,7 @@ impl ProcessManager {
         let mut unit_table = self.build_unit_table();
         let _ = crate::ordering::fill_dependencies(&mut unit_table);
 
-        let mut all_units: Vec<UnitId> = self.services.keys().map(|k| UnitId::new(k)).collect();
+        let mut all_units: Vec<UnitId> = self.services.keys().map(UnitId::new).collect();
 
         crate::ordering::collect_unit_start_subgraph(&mut all_units, &unit_table);
 
