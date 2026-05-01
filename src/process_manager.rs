@@ -145,8 +145,16 @@ impl ProcessManager {
         let mut unit_table: std::collections::HashMap<UnitId, Dependencies> =
             std::collections::HashMap::new();
 
+        // First, add all services to the table with empty dependencies
+        for name in self.services.keys() {
+            unit_table.insert(UnitId::new(name), Dependencies::default());
+        }
+
+        // Then, populate dependencies from ordering config
         for (name, order) in &self.ordering {
-            let mut deps = Dependencies::default();
+            let deps = unit_table
+                .entry(UnitId::new(name))
+                .or_insert_with(Dependencies::default);
 
             for dep in &order.after {
                 deps.after.push(UnitId::new(dep));
@@ -161,6 +169,7 @@ impl ProcessManager {
                 deps.wants.push(UnitId::new(dep));
             }
             for dep in &order.requires {
+                deps.after.push(UnitId::new(dep));
                 deps.requires.push(UnitId::new(dep));
             }
             for dep in &order.wanted_by {
@@ -169,8 +178,6 @@ impl ProcessManager {
             for dep in &order.required_by {
                 deps.required_by.push(UnitId::new(dep));
             }
-
-            unit_table.insert(UnitId::new(name), deps);
         }
 
         unit_table
@@ -299,11 +306,15 @@ impl ProcessManager {
             .services
             .keys()
             .map(|name| {
-                let deps = self
-                    .ordering
-                    .get(name)
-                    .map(|o| o.after.clone())
-                    .unwrap_or_default();
+                let all_deps = self.ordering.get(name);
+                let deps = match all_deps {
+                    Some(o) => {
+                        let mut d = o.after.clone();
+                        d.extend(o.requires.clone());
+                        d
+                    }
+                    None => Vec::new(),
+                };
                 (name.clone(), deps)
             })
             .collect();
