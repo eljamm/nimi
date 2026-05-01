@@ -305,7 +305,7 @@ impl ProcessManager {
             .keys()
             .map(|name| {
                 let all_deps = self.ordering.get(name);
-                let deps = match all_deps {
+                let mut deps = match all_deps {
                     Some(o) => {
                         let mut d = o.after.clone();
                         d.extend(o.requires.clone());
@@ -313,6 +313,10 @@ impl ProcessManager {
                     }
                     None => Vec::new(),
                 };
+                // If any dependency is oneshot, don't wait for Spawned - wait for Ready/Failed instead
+                deps.retain(|dep_name| {
+                    !self.services.get(dep_name).map(|s| matches!(s.service_type, ServiceType::Oneshot)).unwrap_or(false)
+                });
                 (name.clone(), deps)
             })
             .collect();
@@ -321,11 +325,21 @@ impl ProcessManager {
             .services
             .keys()
             .map(|name| {
-                let deps = self
+                let mut deps = self
                     .ordering
                     .get(name)
                     .map(|o| o.after_ready.clone())
                     .unwrap_or_default();
+                // For dependencies that are oneshot, wait for them to complete (Ready/Failed) not just start
+                if let Some(all_deps) = self.ordering.get(name) {
+                    let mut additional_deps: Vec<String> = all_deps.after.clone();
+                    additional_deps.extend(all_deps.requires.clone());
+                    for dep_name in additional_deps {
+                        if self.services.get(&dep_name).map(|s| matches!(s.service_type, ServiceType::Oneshot)).unwrap_or(false) && !deps.contains(&dep_name) {
+                            deps.push(dep_name);
+                        }
+                    }
+                }
                 (name.clone(), deps)
             })
             .collect();

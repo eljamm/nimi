@@ -155,11 +155,25 @@ impl ServiceManager {
         info!(target: &self.name, "Running oneshot service");
         let result = self.spawn_service_process().await;
 
-        if result.is_ok() {
-            let _ = self.event_tx.send(ServiceEvent::Ready(self.name.to_string()));
+        match result {
+            Ok(()) => {
+                let _ = self.event_tx.send(ServiceEvent::Ready(self.name.to_string()));
+            }
+            Err(e) => {
+                use std::os::unix::process::ExitStatusExt;
+                let status = e
+                    .downcast_ref::<ServiceError>()
+                    .map(|se| {
+                        let ServiceError::ProcessExited { status } = se;
+                        *status
+                    })
+                    .unwrap_or_else(|| ExitStatusExt::from_raw(1));
+                let _ = self.event_tx.send(ServiceEvent::Failed(self.name.to_string(), status));
+                return Err(e);
+            }
         }
 
-        result
+        Ok(())
     }
 
     /// Spawn a process with common setup
