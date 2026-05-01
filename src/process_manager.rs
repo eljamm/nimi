@@ -9,7 +9,7 @@ use libmprocs::{ProcConfig, StopSignal, mprocs};
 use log::{debug, info};
 use std::process::Stdio;
 use std::{
-    collections::HashMap, env, io::ErrorKind, path::PathBuf, process::ExitStatus, sync::Arc,
+    collections::{HashMap, HashSet}, env, io::ErrorKind, path::PathBuf, process::ExitStatus, sync::Arc,
 };
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::broadcast;
@@ -300,17 +300,30 @@ impl ProcessManager {
         );
         let tmp_dir = Arc::new(env::temp_dir());
 
-        let spawn_dep_names: HashMap<String, Vec<String>> = self
+        let hard_dep_names: HashMap<String, Vec<String>> = self
             .services
             .keys()
             .map(|name| {
                 let all_deps = self.ordering.get(name);
                 let mut deps = match all_deps {
-                    Some(o) => {
-                        let mut d = o.after.clone();
-                        d.extend(o.requires.clone());
-                        d
-                    }
+                    Some(o) => o.requires.clone(),
+                    None => Vec::new(),
+                };
+                // If any dependency is oneshot, don't wait for Spawned - wait for Ready/Failed instead
+                deps.retain(|dep_name| {
+                    !self.services.get(dep_name).map(|s| matches!(s.service_type, ServiceType::Oneshot)).unwrap_or(false)
+                });
+                (name.clone(), deps)
+            })
+            .collect();
+
+        let soft_dep_names: HashMap<String, Vec<String>> = self
+            .services
+            .keys()
+            .map(|name| {
+                let all_deps = self.ordering.get(name);
+                let mut deps = match all_deps {
+                    Some(o) => o.after.clone(),
                     None => Vec::new(),
                 };
                 // If any dependency is oneshot, don't wait for Spawned - wait for Ready/Failed instead
@@ -344,9 +357,30 @@ impl ProcessManager {
             })
             .collect();
 
+        // Track which oneshot deps are from requires (should propagate failure)
+        let hard_oneshot_deps: HashMap<String, Vec<String>> = self
+            .services
+            .keys()
+            .map(|name| {
+                let deps = self
+                    .ordering
+                    .get(name)
+                    .map(|o| {
+                        o.requires.iter()
+                            .filter(|dep| self.services.get(*dep).map(|s| matches!(s.service_type, ServiceType::Oneshot)).unwrap_or(false))
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                (name.clone(), deps)
+            })
+            .collect();
+
         for (name, service) in self.services {
-            let s_dep_names = spawn_dep_names.get(&name).cloned().unwrap_or_default();
+            let h_dep_names = hard_dep_names.get(&name).cloned().unwrap_or_default();
+            let s_dep_names = soft_dep_names.get(&name).cloned().unwrap_or_default();
             let r_dep_names = ready_dep_names.get(&name).cloned().unwrap_or_default();
+            let ho_dep_names = hard_oneshot_deps.get(&name).cloned().unwrap_or_default();
             let cancel = cancel_tok.clone();
             let event_tx = self.event_tx.clone();
             let mut event_rx = self.event_tx.subscribe();
@@ -365,15 +399,22 @@ impl ProcessManager {
 
             join_set.spawn(async move {
                 let service_name = opts.name.to_string();
-                let mut spawned_satisfied: HashMap<String, bool> =
+                // Hard deps: failure propagates (requires)
+                let mut hard_satisfied: HashMap<String, bool> =
+                    h_dep_names.iter().map(|d| (d.clone(), false)).collect();
+                // Soft deps: failure doesn't propagate (after)
+                let mut soft_satisfied: HashMap<String, bool> =
                     s_dep_names.iter().map(|d| (d.clone(), false)).collect();
                 let mut ready_satisfied: HashMap<String, bool> =
                     r_dep_names.iter().map(|d| (d.clone(), false)).collect();
+                // Hard oneshot deps in ready_satisfied - these should propagate failure
+                let hard_oneshot: HashSet<String> = ho_dep_names.iter().cloned().collect();
 
                 loop {
-                    let all_spawn_done = spawned_satisfied.values().all(|v| *v);
+                    let hard_done = hard_satisfied.values().all(|v| *v);
+                    let soft_done = soft_satisfied.values().all(|v| *v);
                     let all_ready_done = ready_satisfied.values().all(|v| *v);
-                    if all_spawn_done && all_ready_done {
+                    if hard_done && soft_done && all_ready_done {
                         break;
                     }
 
@@ -382,7 +423,10 @@ impl ProcessManager {
                             let event = event.map_err(|e| eyre::eyre!("event channel closed: {e}"))?;
                             match event {
                                 ServiceEvent::Spawned(ref dep) => {
-                                    if let Some(sat) = spawned_satisfied.get_mut(dep) {
+                                    if let Some(sat) = hard_satisfied.get_mut(dep) {
+                                        *sat = true;
+                                    }
+                                    if let Some(sat) = soft_satisfied.get_mut(dep) {
                                         *sat = true;
                                     }
                                 }
@@ -391,14 +435,18 @@ impl ProcessManager {
                                         *sat = true;
                                     }
                                 }
-                                ServiceEvent::Failed(ref dep, _status)
-                                    if spawned_satisfied.contains_key(dep)
-                                        || ready_satisfied.contains_key(dep) =>
-                                {
-                                    return Err(eyre::eyre!(
-                                        "dependency {dep} failed before service {} could start",
-                                        service_name
-                                    ));
+                                ServiceEvent::Failed(ref dep, _status) => {
+                                    // For hard oneshot deps in ready_satisfied, propagate failure
+                                    if ready_satisfied.contains_key(dep) && hard_oneshot.contains(dep) {
+                                        return Err(eyre::eyre!(
+                                            "required dependency {dep} failed before service {} could start",
+                                            service_name
+                                        ));
+                                    }
+                                    // For soft deps in ready_satisfied, mark as satisfied so dependent can still start
+                                    if let Some(sat) = ready_satisfied.get_mut(dep) {
+                                        *sat = true;
+                                    }
                                 }
                                 _ => {}
                             }
