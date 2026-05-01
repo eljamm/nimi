@@ -16,6 +16,21 @@ pub struct ServiceOrdering {
     /// Services that must be ready before this one starts (requires readyCheck on target)
     #[serde(default, rename = "afterReady")]
     pub after_ready: Vec<String>,
+    /// Services that should start before this one (soft ordering)
+    #[serde(default)]
+    pub before: Vec<String>,
+    /// Services that this service wants (soft dependency)
+    #[serde(default)]
+    pub wants: Vec<String>,
+    /// Services that this service requires (hard dependency)
+    #[serde(default)]
+    pub requires: Vec<String>,
+    /// Services that want this service (reverse of wants)
+    #[serde(default, rename = "wantedBy")]
+    pub wanted_by: Vec<String>,
+    /// Services that require this service (reverse of requires)
+    #[serde(default, rename = "requiredBy")]
+    pub required_by: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

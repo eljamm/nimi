@@ -100,64 +100,100 @@ impl ProcessManager {
                     dep
                 );
             }
+            for dep in &order.before {
+                eyre::ensure!(
+                    self.services.contains_key(dep),
+                    "ordering.{name}.before references unknown service: {dep}"
+                );
+            }
+            for dep in &order.wants {
+                eyre::ensure!(
+                    self.services.contains_key(dep),
+                    "ordering.{name}.wants references unknown service: {dep}"
+                );
+            }
+            for dep in &order.requires {
+                eyre::ensure!(
+                    self.services.contains_key(dep),
+                    "ordering.{name}.requires references unknown service: {dep}"
+                );
+            }
+            for dep in &order.wanted_by {
+                eyre::ensure!(
+                    self.services.contains_key(dep),
+                    "ordering.{name}.wantedBy references unknown service: {dep}"
+                );
+            }
+            for dep in &order.required_by {
+                eyre::ensure!(
+                    self.services.contains_key(dep),
+                    "ordering.{name}.requiredBy references unknown service: {dep}"
+                );
+            }
         }
 
-        self.detect_cycles()
+        let unit_table = self.build_unit_table();
+        crate::ordering::sanity_check_dependencies(&unit_table)
+            .map_err(|e| eyre::eyre!("Dependency cycle detected: {}", e))
     }
 
-    /// Detect cycles in the ordering graph via iterative DFS.
-    fn detect_cycles(&self) -> Result<()> {
-        #[derive(Clone, Copy, PartialEq, Eq)]
-        enum Mark {
-            Temporary,
-            Permanent,
-        }
+    fn build_unit_table(
+        &self,
+    ) -> std::collections::HashMap<crate::ordering::UnitId, crate::ordering::Dependencies> {
+        use crate::ordering::{Dependencies, UnitId};
 
-        let mut marks: HashMap<&str, Mark> = HashMap::new();
+        let mut unit_table: std::collections::HashMap<UnitId, Dependencies> =
+            std::collections::HashMap::new();
 
-        for start in self.services.keys() {
-            if marks.get(start.as_str()) == Some(&Mark::Permanent) {
-                continue;
+        for (name, order) in &self.ordering {
+            let mut deps = Dependencies::default();
+
+            for dep in &order.after {
+                deps.after.push(UnitId::new(dep));
+            }
+            for dep in &order.after_ready {
+                deps.after.push(UnitId::new(dep));
+            }
+            for dep in &order.before {
+                deps.before.push(UnitId::new(dep));
+            }
+            for dep in &order.wants {
+                deps.wants.push(UnitId::new(dep));
+            }
+            for dep in &order.requires {
+                deps.requires.push(UnitId::new(dep));
+            }
+            for dep in &order.wanted_by {
+                deps.wanted_by.push(UnitId::new(dep));
+            }
+            for dep in &order.required_by {
+                deps.required_by.push(UnitId::new(dep));
             }
 
-            let mut stack: Vec<(&str, usize)> = vec![(start.as_str(), 0)];
-            marks.insert(start.as_str(), Mark::Temporary);
-
-            while let Some((node, idx)) = stack.last_mut() {
-                let deps = self
-                    .ordering
-                    .get(*node)
-                    .map(|o| o.after.as_slice())
-                    .unwrap_or(&[]);
-
-                if *idx >= deps.len() {
-                    marks.insert(node, Mark::Permanent);
-                    stack.pop();
-                    continue;
-                }
-
-                let dep = deps[*idx].as_str();
-                *idx += 1;
-
-                match marks.get(dep) {
-                    Some(Mark::Permanent) => {}
-                    Some(Mark::Temporary) => {
-                        let cycle: Vec<&str> = stack
-                            .iter()
-                            .map(|(n, _)| *n)
-                            .skip_while(|n| *n != dep)
-                            .collect();
-                        eyre::bail!("dependency cycle detected: {} -> {dep}", cycle.join(" -> "));
-                    }
-                    None => {
-                        marks.insert(dep, Mark::Temporary);
-                        stack.push((dep, 0));
-                    }
-                }
-            }
+            unit_table.insert(UnitId::new(name), deps);
         }
 
-        Ok(())
+        unit_table
+    }
+
+    /// Collect all services that need to be started based on ordering constraints
+    pub fn collect_startup_subgraph(&self) -> Vec<String> {
+        use crate::ordering::UnitId;
+
+        let mut unit_table = self.build_unit_table();
+        let _ = crate::ordering::fill_dependencies(&mut unit_table);
+
+        let mut all_units: Vec<UnitId> = self.services.keys().map(|k| UnitId::new(k)).collect();
+
+        crate::ordering::collect_unit_start_subgraph(&mut all_units, &unit_table);
+
+        all_units.into_iter().map(|id| id.name).collect()
+    }
+
+    /// Find services that should be stopped when given service fails (propagate failure)
+    pub fn propagate_failure(&self, failed_service: &str) -> Vec<String> {
+        let unit_table = self.build_unit_table();
+        crate::ordering::propagate_failure(failed_service, &unit_table)
     }
 
     async fn run_startup_process(&self, bin: &str, cancel_tok: &CancellationToken) -> Result<()> {
