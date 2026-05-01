@@ -152,9 +152,7 @@ impl ProcessManager {
 
         // Then, populate dependencies from ordering config
         for (name, order) in &self.ordering {
-            let deps = unit_table
-                .entry(UnitId::new(name))
-                .or_insert_with(Dependencies::default);
+            let deps = unit_table.entry(UnitId::new(name)).or_default();
 
             for dep in &order.after {
                 deps.after.push(UnitId::new(dep));
