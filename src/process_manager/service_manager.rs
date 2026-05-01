@@ -26,7 +26,7 @@ pub use config_dir::ConfigDir;
 pub use logger::Logger;
 use tokio_util::sync::CancellationToken;
 
-use crate::process_manager::{Service, ServiceEvent, Settings, settings::RestartMode};
+use crate::process_manager::{Service, ServiceEvent, ServiceType, Settings, settings::RestartMode};
 use crate::subreaper::{ChildGuard, Subreaper};
 
 /// Responsible for the running of and managing of service state
@@ -102,6 +102,10 @@ impl ServiceManager {
     /// This will handle restarts, attach logging processes and manage linking the config
     /// directory.
     pub async fn run(&mut self) -> Result<()> {
+        if matches!(self.service.service_type, ServiceType::Oneshot) {
+            return self.run_oneshot().await;
+        }
+
         while let Err(e) = self.spawn_service_process().await {
             match e.downcast_ref() {
                 Some(ServiceError::ProcessExited { status }) => {
@@ -145,6 +149,11 @@ impl ServiceManager {
         }
 
         Ok(())
+    }
+
+    async fn run_oneshot(&mut self) -> Result<()> {
+        info!(target: &self.name, "Running oneshot service");
+        self.spawn_service_process().await
     }
 
     /// Spawn a process with common setup
